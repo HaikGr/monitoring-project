@@ -235,7 +235,7 @@ pipeline {
 
                         git commit -m "Update ${APP} image to ${BUILD_NUMBER}"
 
-                        git push origin main
+                        git push origin HEAD:main
 
                         echo "===== GITOPS UPDATED ====="
                     '''
