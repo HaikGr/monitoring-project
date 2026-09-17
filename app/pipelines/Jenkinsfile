@@ -1,10 +1,6 @@
 pipeline {
     agent any
 
-    triggers {
-        githubPush()
-    }
-
     parameters {
         choice(
             name: 'APP',
@@ -180,7 +176,81 @@ pipeline {
                 }
             }
         }
+
+        stage('Update GitOps Deployment') {
+            steps {
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'github-gitops',
+                        usernameVariable: 'GIT_USERNAME',
+                        passwordVariable: 'GIT_TOKEN'
+                    )
+                ]) {
+                    sh '''
+                        set -e
+
+                        echo "===== UPDATE GITOPS DEPLOYMENT ====="
+
+                        GITOPS_DIR="gitops-repo"
+
+                        rm -rf "${GITOPS_DIR}"
+
+                        echo "Cloning GitOps repository..."
+
+                        git clone \
+                            https://${GIT_USERNAME}:${GIT_TOKEN}@github.com/HaikGr/distributed-web-app-deployment.git \
+                            "${GITOPS_DIR}"
+
+                        cd "${GITOPS_DIR}"
+
+                        echo "Selected application: ${APP}"
+                        echo "Image: ${IMAGE_NAME}"
+                        echo "Tag: ${BUILD_NUMBER}"
+
+                        if [ "${APP}" = "first-app" ]; then
+
+                            echo "Updating first-app image tag..."
+
+                            sed -i '' \
+                                's/^\([[:space:]]*tag:[[:space:]]*\).*/\1"'${BUILD_NUMBER}'"/' \
+                                app/deployment/values-app1.yaml
+
+                        elif [ "${APP}" = "second-app" ]; then
+
+                            echo "Updating second-app image tag..."
+
+                            sed -i '' \
+                                's/^\([[:space:]]*tag:[[:space:]]*\).*/\1"'${BUILD_NUMBER}'"/' \
+                                app/deployment/values-app2.yaml
+
+                        else
+                            echo "Unknown application: ${APP}"
+                            exit 1
+                        fi
+
+                        echo "===== CHANGED FILES ====="
+                        git status
+
+                        echo "===== DIFF ====="
+                        git diff
+
+                        git config user.name "Jenkins"
+                        git config user.email "jenkins@localhost"
+
+                        git add app/deployment/
+
+                        git commit -m "Update ${APP} image to ${BUILD_NUMBER}"
+
+                        git push origin main
+
+                        echo "===== GITOPS UPDATED ====="
+                    '''
+                }
+            }
+        }
     }
+
+
 
     post {
         success {
