@@ -5,7 +5,7 @@ container:
 
 image:
   repository: first-app-image
-  tag: 12
+  tag: "13"
   pullPolicy: Never
 
 service:
