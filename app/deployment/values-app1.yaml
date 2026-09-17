@@ -4,9 +4,9 @@ container:
   name: chat-second-version-first-app
 
 image:
-  repository: first-app-image
+  repository: host.minikube.internal:8082/first-app-image
   tag: "13"
-  pullPolicy: Never
+  pullPolicy: IfNotPresent
 
 service:
   type: ClusterIP
@@ -20,6 +20,9 @@ resources:
   limits:
     cpu: 500m
     memory: 512Mi
+
+imagePullSecrets:
+  - name: nexus-registry
 
 env:
   - name: POSTGRES_HOST
