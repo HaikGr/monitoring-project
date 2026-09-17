@@ -5,7 +5,7 @@ container:
 
 image:
   repository: host.minikube.internal:8082/second-app-image
-  tag: "14"
+  tag: "16"
   pullPolicy: IfNotPresent
 
 service:
