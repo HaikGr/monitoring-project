@@ -191,17 +191,7 @@ pipeline {
 
                         echo "===== UPDATE GITOPS DEPLOYMENT ====="
 
-                        GITOPS_DIR="gitops-repo"
-
-                        rm -rf "${GITOPS_DIR}"
-
                         echo "Cloning GitOps repository..."
-
-                        git clone \
-                            https://${GIT_USERNAME}:${GIT_TOKEN}@github.com/HaikGr/distributed-web-app-deployment.git \
-                            "${GITOPS_DIR}"
-
-                        cd "${GITOPS_DIR}"
 
                         echo "Selected application: ${APP}"
                         echo "Image: ${IMAGE_NAME}"
