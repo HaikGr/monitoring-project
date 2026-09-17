@@ -5,26 +5,66 @@ pipeline {
         githubPush()
     }
 
+    parameters {
+        choice(
+            name: 'APP',
+            choices: [
+                'first-app',
+                'second-app'
+            ],
+            description: 'Choose which chat application to build and push'
+        )
+    }
+
     environment {
         PATH = "/Users/user/.docker/bin:/usr/local/bin:/usr/bin:/bin:${env.PATH}"
 
-        IMAGE_NAME = 'cdc-consumer-ui'
-
         NEXUS_PYPI_URL = 'http://localhost:8081/repository/pypi-group/simple/'
-
     }
 
     stages {
+
+        stage('Configure Application') {
+            steps {
+                script {
+                    if (params.APP == 'first-app') {
+                        env.APP_DIR = '../first_app'
+                        env.IMAGE_NAME = 'first-app-image'
+                    }
+                    else if (params.APP == 'second-app') {
+                        env.APP_DIR = '../second_app'
+                        env.IMAGE_NAME = 'second-app-image'
+                    }
+                    else {
+                        error("Unknown application: ${params.APP}")
+                    }
+
+                    echo "======================================"
+                    echo "Selected application: ${params.APP}"
+                    echo "Application directory: ${env.APP_DIR}"
+                    echo "Docker image: ${env.IMAGE_NAME}"
+                    echo "======================================"
+                }
+            }
+        }
 
         stage('Environment') {
             steps {
                 sh '''
                     echo "===== ENVIRONMENT ====="
+
                     python3 --version
                     docker --version
                     git --version
+
+                    echo "===== WORKSPACE ====="
                     pwd
                     ls -la
+
+                    echo "===== APPLICATION ====="
+                    echo "APP=${APP}"
+                    echo "APP_DIR=${APP_DIR}"
+                    echo "IMAGE_NAME=${IMAGE_NAME}"
 
                     echo "===== BUILD ====="
                     echo "BUILD_NUMBER=${BUILD_NUMBER}"
@@ -34,7 +74,7 @@ pipeline {
 
         stage('Install Dependencies') {
             steps {
-                dir('cdc-consumer-ui') {
+                dir("${env.APP_DIR}") {
                     withCredentials([
                         usernamePassword(
                             credentialsId: 'nexus-key',
@@ -69,7 +109,7 @@ pipeline {
 
         stage('Docker Build') {
             steps {
-                dir('cdc-consumer-ui') {
+                dir("${env.APP_DIR}") {
                     withCredentials([
                         usernamePassword(
                             credentialsId: 'nexus-key',
@@ -81,6 +121,7 @@ pipeline {
                             set -e
 
                             echo "===== DOCKER BUILD ====="
+                            echo "Building ${IMAGE_NAME}"
 
                             docker build \
                                 --build-arg NEXUS_URL="http://${NEXUS_USER}:${NEXUS_PASSWORD}@host.docker.internal:8081/repository/pypi-group/simple/" \
@@ -143,11 +184,12 @@ pipeline {
 
     post {
         success {
-            echo 'Second Web application Docker image built, pushed to Nexus.'
+            echo "Application ${params.APP} built and pushed successfully."
+            echo "Image: localhost:8082/${IMAGE_NAME}:${BUILD_NUMBER}"
         }
 
         failure {
-            echo 'Second Web application pipeline failed.'
+            echo "Pipeline failed for application: ${params.APP}"
         }
     }
 }
