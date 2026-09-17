@@ -28,11 +28,11 @@ pipeline {
             steps {
                 script {
                     if (params.APP == 'first-app') {
-                        env.APP_DIR = '../first_app'
+                        env.APP_DIR = 'app/first_app'
                         env.IMAGE_NAME = 'first-app-image'
                     }
                     else if (params.APP == 'second-app') {
-                        env.APP_DIR = '../second_app'
+                        env.APP_DIR = 'app/second_app'
                         env.IMAGE_NAME = 'second-app-image'
                     }
                     else {
