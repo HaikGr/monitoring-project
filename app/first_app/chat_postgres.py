@@ -92,6 +92,3 @@ def save_messages():
 
     finally:
         connection.close()
-
-
-save_messages()

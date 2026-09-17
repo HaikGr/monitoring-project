@@ -734,6 +734,40 @@ def chat_page():
             background: #eeeeee;
         }
 
+        .header-content {
+
+            display:
+                flex;
+
+            justify-content:
+                space-between;
+
+            align-items:
+                center;
+
+            gap:
+                15px;
+        }
+
+        #exportButton {
+
+            background:
+                #2563eb;
+
+            color:
+                white;
+
+            white-space:
+                nowrap;
+        }
+
+
+        #exportButton:hover {
+
+            background:
+                #1d4ed8;
+        }
+
         #typingIndicator {
             min-height: 24px;
             padding: 4px 15px;
@@ -773,6 +807,18 @@ def chat_page():
 </head>
 
 <body>
+
+<div class="header">
+
+    <h1>
+        App 2 Chat
+    </h1>
+
+    <p>
+        PostgreSQL → Debezium → Kafka
+    </p>
+
+</div>
 
 <div class="container">
 
@@ -1172,6 +1218,106 @@ input.addEventListener(
             );
     }
 );
+
+
+/* ============================================================
+   Export messages
+   ============================================================ */
+
+async function exportMessages() {
+
+    const exportButton =
+        document.getElementById(
+            "exportButton"
+        );
+
+
+    exportButton.disabled =
+        true;
+
+
+    exportButton.textContent =
+        "Exporting...";
+
+
+    try {
+
+        const response =
+            await fetch(
+                "/export-messages",
+                {
+                    method:
+                        "POST"
+                }
+            );
+
+
+        if (
+            !response.ok
+        ) {
+
+            let errorMessage =
+                "Failed to export messages";
+
+
+            try {
+
+                const error =
+                    await response.json();
+
+                errorMessage =
+                    error.detail ||
+                    errorMessage;
+
+            } catch (_) {
+
+                // Keep default error message.
+            }
+
+
+            throw new Error(
+                errorMessage
+            );
+        }
+
+
+        const data =
+            await response.json();
+
+
+        console.log(
+            data
+        );
+
+
+        alert(
+            "Messages exported successfully!"
+        );
+
+
+    } catch (error) {
+
+        console.error(
+            "Failed to export messages:",
+            error
+        );
+
+
+        alert(
+            error.message ||
+            "Failed to export messages"
+        );
+
+
+    } finally {
+
+        exportButton.disabled =
+            false;
+
+        exportButton.textContent =
+            "Export Messages";
+    }
+}
 
 
 /* ============================================================

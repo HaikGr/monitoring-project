@@ -1,5 +1,6 @@
 import os
-
+from pathlib import Path
+import uuid
 import psycopg
 
 
@@ -8,6 +9,11 @@ DB_PORT = os.environ["POSTGRES_PORT"]
 DB_NAME = os.environ["POSTGRES_DB"]
 DB_USER = os.environ["POSTGRES_USER"]
 DB_PASSWORD = os.environ["POSTGRES_PASSWORD"]
+
+DATA_DIR = Path("data")
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+file_path = DATA_DIR / f"exported_data_{uuid.uuid4()}.csv"
 
 
 def get_connection():
@@ -99,3 +105,29 @@ def create_message(
         "content": row[4],
         "created_at": row[5].isoformat(),
     }
+
+def save_messages():
+    connection = psycopg.connect(
+        host=DB_HOST,
+        port=DB_PORT,
+        dbname=DB_NAME,
+        user=DB_USER,
+        password=DB_PASSWORD,
+    )
+
+    try:
+        with connection.cursor() as cursor:
+            with file_path.open("wb") as f:
+                with cursor.copy(
+                    """
+                    COPY messages TO STDOUT
+                    WITH CSV HEADER
+                    """
+                ) as copy:
+                    for data in copy:
+                        f.write(data)
+
+        print(f"Messages exported to: {file_path}")
+
+    finally:
+        connection.close()

@@ -16,7 +16,7 @@ from prometheus_client import (
     generate_latest,
 )
 
-from chat_postgres import create_message
+from chat_postgres import create_message, save_messages
 
 from metrics import (
     HTTP_ERRORS,
@@ -495,6 +495,13 @@ def health() -> dict[str, str]:
         "instance_id": INSTANCE_ID,
     }
 
+
+# Postgre
+
+@app.post("/export-messages")
+def export_messages():
+    save_messages()
+    return {"status": "export started"}
 
 # ============================================================
 # Debug
@@ -1376,6 +1383,41 @@ def index() -> str:
                 20px;
         }
 
+        .header-content {
+
+            display:
+                flex;
+
+            justify-content:
+                space-between;
+
+            align-items:
+                center;
+
+            gap:
+                15px;
+        }
+
+
+        #exportButton {
+
+            background:
+                #2563eb;
+
+            color:
+                white;
+
+            white-space:
+                nowrap;
+        }
+
+
+        #exportButton:hover {
+
+            background:
+                #1d4ed8;
+        }
+
 
         .header p {
 
@@ -1567,17 +1609,30 @@ def index() -> str:
 <div class="chat">
 
 
-    <div class="header">
+<div class="header">
 
-        <h1>
-            App 2 Chat
-        </h1>
+    <div class="header-content">
 
-        <p>
-            PostgreSQL → Debezium → Kafka
-        </p>
+        <div>
+            <h1>
+                App 2 Chat
+            </h1>
+
+            <p>
+                PostgreSQL → Debezium → Kafka
+            </p>
+        </div>
+
+        <button
+            id="exportButton"
+            onclick="exportMessages()"
+        >
+            Export Messages
+        </button>
 
     </div>
+
+</div>
 
 
     <div id="messages"></div>
@@ -1701,6 +1756,105 @@ async function publishTyping(
             "Failed to publish typing event:",
             error
         );
+    }
+}
+
+/* ============================================================
+   Export messages
+   ============================================================ */
+
+async function exportMessages() {
+
+    const exportButton =
+        document.getElementById(
+            "exportButton"
+        );
+
+
+    exportButton.disabled =
+        true;
+
+
+    exportButton.textContent =
+        "Exporting...";
+
+
+    try {
+
+        const response =
+            await fetch(
+                "/export-messages",
+                {
+                    method:
+                        "POST"
+                }
+            );
+
+
+        if (
+            !response.ok
+        ) {
+
+            let errorMessage =
+                "Failed to export messages";
+
+
+            try {
+
+                const error =
+                    await response.json();
+
+                errorMessage =
+                    error.detail ||
+                    errorMessage;
+
+            } catch (_) {
+
+                // Keep default error message.
+            }
+
+
+            throw new Error(
+                errorMessage
+            );
+        }
+
+
+        const data =
+            await response.json();
+
+
+        console.log(
+            data
+        );
+
+
+        alert(
+            "Messages exported successfully!"
+        );
+
+
+    } catch (error) {
+
+        console.error(
+            "Failed to export messages:",
+            error
+        );
+
+
+        alert(
+            error.message ||
+            "Failed to export messages"
+        );
+
+
+    } finally {
+
+        exportButton.disabled =
+            false;
+
+        exportButton.textContent =
+            "Export Messages";
     }
 }
 
