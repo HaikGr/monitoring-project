@@ -211,17 +211,21 @@ pipeline {
 
                             echo "Updating first-app image tag..."
 
-                            sed -i.bak '' \
-                                "s/^  tag: .*/  tag: \\${BUILD_NUMBER}\\"/" \
+                            sed -i.bak \
+                                "s/^  tag: .*/  tag: \"${BUILD_NUMBER}\"/" \
                                 app/deployment/values-app1.yaml
+
+                            rm -f app/deployment/values-app1.yaml.bak
 
                         elif [ "${APP}" = "second-app" ]; then
 
                             echo "Updating second-app image tag..."
 
-                            sed -i.bak '' \
-                                "s/^ tag:  .*/. tag:  \\${BUILD_NUMBER}\\"/" \
+                            sed -i.bak \
+                                "s/^  tag: .*/  tag: \"${BUILD_NUMBER}\"/" \
                                 app/deployment/values-app2.yaml
+
+                            rm -f app/deployment/values-app2.yaml.bak
 
                         else
                             echo "Unknown application: ${APP}"
