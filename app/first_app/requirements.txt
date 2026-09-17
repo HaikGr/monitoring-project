@@ -1,0 +1,7 @@
+fastapi[standard]
+uvicorn[standard]
+prometheus-client[standard]
+confluent-kafka
+psycopg[binary]
+kafka-python
+boto3

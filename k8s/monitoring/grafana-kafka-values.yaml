@@ -1,0 +1,3 @@
+grafana:
+  plugins:
+    - hamedkarbasi93-kafka-datasource

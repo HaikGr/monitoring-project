@@ -1,0 +1,59 @@
+replicaCount: 2
+
+container:
+  name: chat-second-version-first-app
+
+image:
+  repository: first-app-image
+  tags: "9"
+  pullPolicy: Never
+
+service:
+  type: ClusterIP
+  port: 8000
+  targetPort: 8000
+
+resources:
+  requests:
+    cpu: 200m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+env:
+  - name: POSTGRES_HOST
+    value: "postgres.postgres.svc.cluster.local"
+
+  - name: POSTGRES_PORT
+    value: "5432"
+
+  - name: POSTGRES_DB
+    valueFrom:
+      secretKeyRef:
+        name: postgres-credentials
+        key: POSTGRES_DB
+
+  - name: POSTGRES_USER
+    valueFrom:
+      secretKeyRef:
+        name: postgres-credentials
+        key: POSTGRES_USER
+
+  - name: POSTGRES_PASSWORD
+    valueFrom:
+      secretKeyRef:
+        name: postgres-credentials
+        key: POSTGRES_PASSWORD
+
+  - name: KAFKA_BOOTSTRAP_SERVERS
+    value: "my-kafka-kafka-bootstrap.kafka.svc.cluster.local:9092"
+
+  - name: KAFKA_TOPIC
+    value: "chat-messages"
+
+  - name: KAFKA_GROUP_ID
+    value: "app1-chat"
+
+  - name: MAX_MESSAGES
+    value: "100"

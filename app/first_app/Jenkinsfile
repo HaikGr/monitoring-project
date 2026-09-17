@@ -1,0 +1,153 @@
+pipeline {
+    agent any
+
+    triggers {
+        githubPush()
+    }
+
+    environment {
+        PATH = "/Users/user/.docker/bin:/usr/local/bin:/usr/bin:/bin:${env.PATH}"
+
+        IMAGE_NAME = 'cdc-consumer-ui'
+
+        NEXUS_PYPI_URL = 'http://localhost:8081/repository/pypi-group/simple/'
+
+    }
+
+    stages {
+
+        stage('Environment') {
+            steps {
+                sh '''
+                    echo "===== ENVIRONMENT ====="
+                    python3 --version
+                    docker --version
+                    git --version
+                    pwd
+                    ls -la
+
+                    echo "===== BUILD ====="
+                    echo "BUILD_NUMBER=${BUILD_NUMBER}"
+                '''
+            }
+        }
+
+        stage('Install Dependencies') {
+            steps {
+                dir('cdc-consumer-ui') {
+                    withCredentials([
+                        usernamePassword(
+                            credentialsId: 'nexus-key',
+                            usernameVariable: 'NEXUS_USER',
+                            passwordVariable: 'NEXUS_PASSWORD'
+                        )
+                    ]) {
+                        sh '''
+                            set -e
+
+                            echo "===== CREATE VIRTUAL ENVIRONMENT ====="
+
+                            rm -rf .venv
+                            python3 -m venv .venv
+
+                            .venv/bin/python -m pip install --upgrade pip
+
+                            echo "===== INSTALL REQUIREMENTS FROM NEXUS ====="
+
+                            .venv/bin/pip install \
+                                --index-url "http://${NEXUS_USER}:${NEXUS_PASSWORD}@localhost:8081/repository/pypi-group/simple/" \
+                                -r requirements.txt
+
+                            echo "===== INSTALLED PACKAGES ====="
+
+                            .venv/bin/pip list
+                        '''
+                    }
+                }
+            }
+        }
+
+        stage('Docker Build') {
+            steps {
+                dir('cdc-consumer-ui') {
+                    withCredentials([
+                        usernamePassword(
+                            credentialsId: 'nexus-key',
+                            usernameVariable: 'NEXUS_USER',
+                            passwordVariable: 'NEXUS_PASSWORD'
+                        )
+                    ]) {
+                        sh '''
+                            set -e
+
+                            echo "===== DOCKER BUILD ====="
+
+                            docker build \
+                                --build-arg NEXUS_URL="http://${NEXUS_USER}:${NEXUS_PASSWORD}@host.docker.internal:8081/repository/pypi-group/simple/" \
+                                -t ${IMAGE_NAME}:${BUILD_NUMBER} \
+                                -t ${IMAGE_NAME}:latest \
+                                .
+                        '''
+                    }
+                }
+            }
+        }
+
+        stage('Docker Images') {
+            steps {
+                sh '''
+                    echo "===== DOCKER IMAGES ====="
+
+                    docker images ${IMAGE_NAME}
+                '''
+            }
+        }
+
+        stage('Push Docker Image') {
+            steps {
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'nexus-key',
+                        usernameVariable: 'NEXUS_USER',
+                        passwordVariable: 'NEXUS_PASSWORD'
+                    )
+                ]) {
+                    sh '''
+                        set -e
+
+                        echo "===== LOGIN TO NEXUS DOCKER REGISTRY ====="
+
+                        echo "${NEXUS_PASSWORD}" | docker login localhost:8082 \
+                            --username "${NEXUS_USER}" \
+                            --password-stdin
+
+                        echo "===== TAG IMAGE ====="
+
+                        docker tag \
+                            ${IMAGE_NAME}:${BUILD_NUMBER} \
+                            localhost:8082/${IMAGE_NAME}:${BUILD_NUMBER}
+
+                        echo "===== PUSH IMAGE ====="
+
+                        docker push \
+                            localhost:8082/${IMAGE_NAME}:${BUILD_NUMBER}
+
+                        echo "===== IMAGE PUSHED ====="
+
+                        echo "localhost:8082/${IMAGE_NAME}:${BUILD_NUMBER}"
+                    '''
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo 'Second Web application Docker image built, pushed to Nexus.'
+        }
+
+        failure {
+            echo 'Second Web application pipeline failed.'
+        }
+    }
+}

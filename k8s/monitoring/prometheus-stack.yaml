@@ -1,0 +1,9 @@
+kubelet:
+  enabled: true
+  serviceMonitor:
+    # Option A: If there is a block dropping container metrics, remove it.
+    # Option B: Add container_cpu_usage_seconds_total to the allowed regex list if a keep rule exists.
+    cAdvisorMetricRelabelings:
+      - sourceLabels: [__name__]
+        regex: '(container_cpu_usage_seconds_total|container_memory_working_set_bytes)' # Add your metric here
+        action: keep

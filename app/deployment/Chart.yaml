@@ -1,0 +1,11 @@
+apiVersion: v2
+
+name: chat-second-version
+
+description: Two applications that speak with each other
+
+type: application
+
+version: 1.0.0
+
+appVersion: "1.0"

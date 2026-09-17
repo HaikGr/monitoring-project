@@ -1,0 +1,20 @@
+# servicemonitor-example.yaml
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: chat-second-version-servicemonitor
+  namespace: monitoring
+  labels:
+    app: chat-second-version
+spec:
+  selector:
+    matchLabels:
+      app: chat-first-app
+  endpoints:
+  - port: metrics
+    interval: 30s
+    path: /metrics
+  namespaceSelector:
+    matchNames:
+    - default
+    - monitoring-project-dev

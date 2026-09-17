@@ -1,0 +1,5 @@
+kafkaServer:
+  - my-kafka-kafka-bootstrap.kafka.svc.cluster.local:9092
+
+serviceMonitor:
+  enabled: false

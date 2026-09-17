@@ -1,0 +1,9 @@
+# postgres-exporter-values.yaml
+config:
+  datasource:
+    host: "postgres.postgres.svc.cluster.local"
+    user: "postgres_exporter"
+    password: "postgres_exporter"
+    database: "distributed"
+    port: "5432"
+    sslmode: "disable"
