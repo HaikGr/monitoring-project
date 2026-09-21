@@ -1,8 +1,14 @@
-import os
-from pathlib import Path
-import uuid
-import psycopg
+"""Postgres access for APP 2.
 
+main.py (app2) does: `from postgres import init_db, create_message`
+Save this as postgres.py in app2.
+"""
+
+import os
+from typing import Any
+
+import psycopg
+from psycopg_pool import ConnectionPool
 
 DB_HOST = os.environ["POSTGRES_HOST"]
 DB_PORT = os.environ["POSTGRES_PORT"]
@@ -10,44 +16,53 @@ DB_NAME = os.environ["POSTGRES_DB"]
 DB_USER = os.environ["POSTGRES_USER"]
 DB_PASSWORD = os.environ["POSTGRES_PASSWORD"]
 
-DATA_DIR = Path("data")
-DATA_DIR.mkdir(parents=True, exist_ok=True)
+POOL_MIN = int(os.getenv("DB_POOL_MIN", "1"))
+POOL_MAX = int(os.getenv("DB_POOL_MAX", "10"))
+STATEMENT_TIMEOUT_MS = int(os.getenv("DB_STATEMENT_TIMEOUT_MS", "10000"))
+
+CONNINFO = (
+    f"host={DB_HOST} port={DB_PORT} dbname={DB_NAME} "
+    f"user={DB_USER} password={DB_PASSWORD} connect_timeout=5"
+)
+
+pool = ConnectionPool(
+    conninfo=CONNINFO,
+    min_size=POOL_MIN,
+    max_size=POOL_MAX,
+    timeout=10,
+    kwargs={"options": f"-c statement_timeout={STATEMENT_TIMEOUT_MS}"},
+    open=True,
+)
 
 
+def init_db() -> None:
+    """Create the messages table if missing. Safe to run on every startup.
 
-def get_connection():
-    return psycopg.connect(
-        host=DB_HOST,
-        port=DB_PORT,
-        dbname=DB_NAME,
-        user=DB_USER,
-        password=DB_PASSWORD,
-    )
-
-
-def init_db():
+    REPLICA IDENTITY FULL makes Debezium emit the complete row in `before`
+    on UPDATE/DELETE. Harmless for INSERT-only chat, but keeps CDC consistent.
     """
-    Create the chat messages table if it does not already exist.
-    """
-
-    with get_connection() as conn:
-
-        with conn.cursor() as cursor:
-
+    with pool.connection() as connection:
+        with connection.cursor() as cursor:
             cursor.execute(
                 """
                 CREATE TABLE IF NOT EXISTS messages (
-                    id SERIAL PRIMARY KEY,
+                    id              BIGSERIAL PRIMARY KEY,
                     conversation_id VARCHAR(255) NOT NULL,
-                    sender VARCHAR(255) NOT NULL,
-                    receiver VARCHAR(255) NOT NULL,
-                    content TEXT NOT NULL,
-                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    sender          VARCHAR(255) NOT NULL,
+                    receiver        VARCHAR(255) NOT NULL,
+                    content         TEXT NOT NULL,
+                    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
                 );
                 """
             )
-
-        conn.commit()
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_messages_conversation_created
+                ON messages (conversation_id, created_at);
+                """
+            )
+            cursor.execute("ALTER TABLE messages REPLICA IDENTITY FULL;")
+    print("Database initialised.", flush=True)
 
 
 def create_message(
@@ -55,46 +70,19 @@ def create_message(
     sender: str,
     receiver: str,
     content: str,
-) -> dict:
-    """
-    Insert a chat message into PostgreSQL.
-
-    Debezium watches this table and publishes
-    the INSERT event to Kafka.
-    """
-
-    with get_connection() as conn:
-
-        with conn.cursor() as cursor:
-
+) -> dict[str, Any]:
+    """Insert one message and return it. Debezium picks the row up from the WAL."""
+    with pool.connection() as connection:
+        with connection.cursor() as cursor:
             cursor.execute(
                 """
-                INSERT INTO messages (
-                    conversation_id,
-                    sender,
-                    receiver,
-                    content
-                )
+                INSERT INTO messages (conversation_id, sender, receiver, content)
                 VALUES (%s, %s, %s, %s)
-                RETURNING
-                    id,
-                    conversation_id,
-                    sender,
-                    receiver,
-                    content,
-                    created_at;
+                RETURNING id, conversation_id, sender, receiver, content, created_at;
                 """,
-                (
-                    conversation_id,
-                    sender,
-                    receiver,
-                    content,
-                ),
+                (conversation_id, sender, receiver, content),
             )
-
             row = cursor.fetchone()
-
-        conn.commit()
 
     return {
         "id": row[0],
@@ -105,29 +93,15 @@ def create_message(
         "created_at": row[5].isoformat(),
     }
 
-def save_messages():
-    connection = psycopg.connect(
+
+def open_export_connection() -> psycopg.Connection:
+    """Dedicated connection for COPY exports (long statement timeout)."""
+    return psycopg.connect(
         host=DB_HOST,
         port=DB_PORT,
         dbname=DB_NAME,
         user=DB_USER,
         password=DB_PASSWORD,
+        connect_timeout=5,
+        options="-c statement_timeout=60000",
     )
-
-    try:
-        file_path = DATA_DIR / f"exported_data_{uuid.uuid4()}.csv"
-        with connection.cursor() as cursor:
-            with file_path.open("wb") as f:
-                with cursor.copy(
-                    """
-                    COPY messages TO STDOUT
-                    WITH CSV HEADER
-                    """
-                ) as copy:
-                    for data in copy:
-                        f.write(data)
-
-        print(f"Messages exported to: {file_path}")
-
-    finally:
-        connection.close()
