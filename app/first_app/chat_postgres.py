@@ -12,7 +12,7 @@ DB_PASSWORD = os.environ["POSTGRES_PASSWORD"]
 DATA_DIR = Path("data")
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-file_path = DATA_DIR / f"exported_data_{uuid.uuid4()}.csv"
+
 
 
 def create_message(
@@ -77,6 +77,7 @@ def save_messages():
     )
 
     try:
+        file_path = DATA_DIR / f"exported_data_{uuid.uuid4()}.csv"
         with connection.cursor() as cursor:
             with file_path.open("wb") as f:
                 with cursor.copy(
