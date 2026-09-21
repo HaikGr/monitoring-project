@@ -1,4 +1,4 @@
-replicaCount: 2
+replicaCount: 1
 
 container:
   name: chat-second-version-first-app
@@ -60,3 +60,24 @@ env:
 
   - name: MAX_MESSAGES
     value: "100"
+
+  - name: S3_BUCKET
+    value: "data-uploading-bucket-haik-dev"
+
+  - name: S3_PREFIX
+    value: "chat-exports"
+
+  - name: AWS_ACCESS_KEY_ID
+    valueFrom:
+      secretKeyRef:
+        name: aws-credentials
+        key: access-key-id
+
+  - name: AWS_SECRET_ACCESS_KEY
+    valueFrom:
+      secretKeyRef:
+        name: aws-credentials
+        key: secret-access-key
+
+  - name: AWS_DEFAULT_REGION
+    value: "us-east-1"

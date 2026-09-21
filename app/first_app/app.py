@@ -18,6 +18,10 @@ from prometheus_client import (
     generate_latest,
 )
 
+from s3_import import (
+    upload_file_to_s3,
+)
+
 from chat_postgres import create_message, save_messages
 
 from metrics import (
@@ -502,8 +506,35 @@ def health() -> dict[str, str]:
 
 @app.post("/export-messages")
 def export_messages():
-    save_messages()
-    return {"status": "export started"}
+    try:
+        # 1. Export PostgreSQL → CSV
+        file_path = save_messages()
+
+        # 2. Upload CSV → S3
+        s3_key = upload_file_to_s3(
+            file_path
+        )
+
+        return {
+            "status": "success",
+            "file": str(file_path),
+            "s3_bucket": os.environ["S3_BUCKET"],
+            "s3_key": s3_key,
+            "s3_uri": (
+                f"s3://"
+                f"{os.environ['S3_BUCKET']}/"
+                f"{s3_key}"
+            ),
+        }
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Failed to export messages "
+                f"and upload to S3: {exc}"
+            ),
+        )
 
 # ============================================================
 # Debug
@@ -1772,14 +1803,9 @@ async function exportMessages() {
             "exportButton"
         );
 
-
-    exportButton.disabled =
-        true;
-
-
+    exportButton.disabled = true;
     exportButton.textContent =
         "Exporting...";
-
 
     try {
 
@@ -1787,74 +1813,47 @@ async function exportMessages() {
             await fetch(
                 "/export-messages",
                 {
-                    method:
-                        "POST"
+                    method: "POST"
                 }
             );
-
-
-        if (
-            !response.ok
-        ) {
-
-            let errorMessage =
-                "Failed to export messages";
-
-
-            try {
-
-                const error =
-                    await response.json();
-
-                errorMessage =
-                    error.detail ||
-                    errorMessage;
-
-            } catch (_) {
-
-                // Keep default error message.
-            }
-
-
-            throw new Error(
-                errorMessage
-            );
-        }
-
 
         const data =
             await response.json();
 
+        if (!response.ok) {
+
+            throw new Error(
+                data.detail ||
+                "Export failed"
+            );
+        }
 
         console.log(
+            "Export result:",
             data
         );
 
-
         alert(
-            "Messages exported successfully!"
+            "Messages exported successfully!\n\n" +
+            "S3 location:\n" +
+            data.s3_uri
         );
-
 
     } catch (error) {
 
         console.error(
-            "Failed to export messages:",
+            "Export failed:",
             error
         );
 
-
         alert(
             error.message ||
-            "Failed to export messages"
+            "Export failed"
         );
-
 
     } finally {
 
-        exportButton.disabled =
-            false;
-
+        exportButton.disabled = false;
         exportButton.textContent =
             "Export Messages";
     }

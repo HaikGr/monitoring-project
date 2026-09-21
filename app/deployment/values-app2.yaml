@@ -1,11 +1,11 @@
-replicaCount: 2
+replicaCount: 1
 
 container:
   name: chat-second-version-second-app
 
 image:
   repository: host.minikube.internal:8082/second-app-image
-  tag: "20"
+  tag: "18"
   pullPolicy: IfNotPresent
 
 service:

@@ -1,7 +1,8 @@
 import os
-import psycopg
 import uuid
 from pathlib import Path
+
+import psycopg
 
 DB_HOST = os.environ["POSTGRES_HOST"]
 DB_PORT = os.environ["POSTGRES_PORT"]
@@ -11,8 +12,6 @@ DB_PASSWORD = os.environ["POSTGRES_PASSWORD"]
 
 DATA_DIR = Path("data")
 DATA_DIR.mkdir(parents=True, exist_ok=True)
-
-
 
 
 def create_message(
@@ -48,7 +47,12 @@ def create_message(
                     content,
                     created_at;
                 """,
-                (conversation_id, sender, receiver, content),
+                (
+                    conversation_id,
+                    sender,
+                    receiver,
+                    content,
+                ),
             )
 
             row = cursor.fetchone()
@@ -67,7 +71,14 @@ def create_message(
         connection.close()
 
 
-def save_messages():
+def save_messages() -> Path:
+    """
+    Export all messages from PostgreSQL into a CSV file.
+
+    Returns:
+        Path to the generated CSV file.
+    """
+
     connection = psycopg.connect(
         host=DB_HOST,
         port=DB_PORT,
@@ -76,8 +87,12 @@ def save_messages():
         password=DB_PASSWORD,
     )
 
+    file_path = (
+        DATA_DIR
+        / f"exported_data_{uuid.uuid4()}.csv"
+    )
+
     try:
-        file_path = DATA_DIR / f"exported_data_{uuid.uuid4()}.csv"
         with connection.cursor() as cursor:
             with file_path.open("wb") as f:
                 with cursor.copy(
@@ -89,7 +104,12 @@ def save_messages():
                     for data in copy:
                         f.write(data)
 
-        print(f"Messages exported to: {file_path}")
+        print(
+            f"Messages exported to: {file_path}",
+            flush=True,
+        )
+
+        return file_path
 
     finally:
         connection.close()
