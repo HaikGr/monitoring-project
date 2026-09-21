@@ -11,6 +11,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app.py .
 COPY postgres.py .
+COPY metrics.py .
 
 EXPOSE 8000
 
