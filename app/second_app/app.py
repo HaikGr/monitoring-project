@@ -4,15 +4,14 @@ import asyncio
 import json
 import os
 import threading
-import uuid
-from pathlib import Path
 from collections import deque
-
-import psycopg
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
+import uuid
 
+import psycopg
 from confluent_kafka import Consumer, KafkaException, Producer
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
@@ -22,7 +21,36 @@ from postgres import init_db, create_message
 
 
 # ============================================================
-# Export configuration
+# Configuration
+# ============================================================
+
+KAFKA_BOOTSTRAP_SERVERS = os.getenv(
+    "KAFKA_BOOTSTRAP_SERVERS",
+    "my-kafka-kafka-bootstrap.kafka.svc.cluster.local:9092",
+)
+
+KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "chat-messages")
+KAFKA_GROUP_ID = os.getenv("KAFKA_GROUP_ID", "app2-chat")
+KAFKA_TYPING_TOPIC = os.getenv("KAFKA_TYPING_TOPIC", "chat-typing")
+
+APP_ID = os.getenv("APP_ID", "app2")
+OTHER_APP_ID = os.getenv("OTHER_APP_ID", "app1")
+
+MAX_MESSAGES = int(os.getenv("MAX_MESSAGES", "100"))
+TYPING_TIMEOUT_MS = int(os.getenv("TYPING_TIMEOUT_MS", "4000"))
+
+
+# ============================================================
+# Instance identity / consumer groups
+# ============================================================
+
+INSTANCE_ID = os.getenv("HOSTNAME", APP_ID)
+CHAT_CONSUMER_GROUP = f"{KAFKA_GROUP_ID}-{INSTANCE_ID}"
+TYPING_CONSUMER_GROUP = f"{KAFKA_GROUP_ID}-typing-{INSTANCE_ID}"
+
+
+# ============================================================
+# PostgreSQL export configuration
 # ============================================================
 
 DB_HOST = os.environ["POSTGRES_HOST"]
@@ -36,34 +64,36 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def save_messages():
-    """Export PostgreSQL messages to a CSV file when requested."""
+    """Export PostgreSQL messages to a CSV file in the pod."""
+
+    file_path = DATA_DIR / f"exported_data_{uuid.uuid4()}.csv"
+
     connection = psycopg.connect(
         host=DB_HOST,
         port=DB_PORT,
         dbname=DB_NAME,
         user=DB_USER,
         password=DB_PASSWORD,
+        connect_timeout=5,
+        options="-c statement_timeout=30000",
     )
-
-    file_path = DATA_DIR / f"exported_data_{uuid.uuid4()}.csv"
 
     try:
         with connection.cursor() as cursor:
-            with file_path.open("wb") as f:
+            with file_path.open("wb") as file:
                 with cursor.copy(
                     """
                     COPY messages TO STDOUT
                     WITH CSV HEADER
                     """
                 ) as copy:
-                    for data in copy:
-                        f.write(data)
+                    for chunk in copy:
+                        file.write(chunk)
 
         print(
             f"Messages exported to: {file_path}",
             flush=True,
         )
-
         return file_path
 
     finally:
@@ -71,70 +101,16 @@ def save_messages():
 
 
 # ============================================================
-# Configuration
-# ============================================================
-
-KAFKA_BOOTSTRAP_SERVERS = os.getenv(
-    "KAFKA_BOOTSTRAP_SERVERS",
-    "my-kafka-kafka-bootstrap.kafka.svc.cluster.local:9092",
-)
-
-KAFKA_TOPIC = os.getenv(
-    "KAFKA_TOPIC",
-    "chat-messages",
-)
-
-KAFKA_GROUP_ID = os.getenv(
-    "KAFKA_GROUP_ID",
-    "app1-chat",
-)
-
-KAFKA_TYPING_TOPIC = os.getenv(
-    "KAFKA_TYPING_TOPIC",
-    "chat-typing",
-)
-
-APP_ID = os.getenv(
-    "APP_ID",
-    "app1",
-)
-
-MAX_MESSAGES = int(
-    os.getenv("MAX_MESSAGES", "100")
-)
-
-# Kubernetes normally sets HOSTNAME to the pod name.
-# This makes every replica receive the complete Kafka stream
-# instead of Kafka distributing messages between replicas.
-INSTANCE_ID = os.getenv(
-    "HOSTNAME",
-    APP_ID,
-)
-
-# Every replica gets its own group.
-CHAT_CONSUMER_GROUP = f"{KAFKA_GROUP_ID}-{INSTANCE_ID}"
-TYPING_CONSUMER_GROUP = f"{KAFKA_GROUP_ID}-typing-{INSTANCE_ID}"
-
-
-# ============================================================
 # In-memory state
-#
-# IMPORTANT:
-# Every replica receives the full Kafka stream because the
-# consumer groups above are unique per replica.
 # ============================================================
 
-chat_messages: deque[dict[str, Any]] = deque(
-    maxlen=MAX_MESSAGES
-)
-
+chat_messages: deque[dict[str, Any]] = deque(maxlen=MAX_MESSAGES)
 typing_users: dict[str, dict[str, Any]] = {}
-
 state_lock = threading.Lock()
 
 
 # ============================================================
-# Kafka consumers
+# Kafka clients
 # ============================================================
 
 chat_consumer = Consumer(
@@ -146,7 +122,6 @@ chat_consumer = Consumer(
     }
 )
 
-
 typing_consumer = Consumer(
     {
         "bootstrap.servers": KAFKA_BOOTSTRAP_SERVERS,
@@ -156,30 +131,17 @@ typing_consumer = Consumer(
     }
 )
 
-
-# ============================================================
-# Kafka producer for typing
-# ============================================================
-
 typing_producer = Producer(
-    {
-        "bootstrap.servers": KAFKA_BOOTSTRAP_SERVERS,
-    }
+    {"bootstrap.servers": KAFKA_BOOTSTRAP_SERVERS}
 )
 
-
-# ============================================================
-# Thread lifecycle
-# ============================================================
-
 stop_event = threading.Event()
-
 chat_consumer_thread: threading.Thread | None = None
 typing_consumer_thread: threading.Thread | None = None
 
 
 # ============================================================
-# Utility
+# Utilities
 # ============================================================
 
 def now_ms() -> int:
@@ -187,13 +149,6 @@ def now_ms() -> int:
 
 
 def message_sort_key(message: dict[str, Any]) -> tuple[str, int]:
-    """
-    Sort by created_at first and id second.
-
-    This is important because Kafka partitions do not guarantee
-    a single global ordering across partitions.
-    """
-
     created_at = message.get("created_at") or ""
 
     try:
@@ -201,11 +156,11 @@ def message_sort_key(message: dict[str, Any]) -> tuple[str, int]:
     except (TypeError, ValueError):
         message_id = 0
 
-    return (str(created_at), message_id)
+    return str(created_at), message_id
 
 
 # ============================================================
-# Chat Kafka Consumer
+# Chat Kafka consumer
 # ============================================================
 
 def consume_chat_messages() -> None:
@@ -215,8 +170,8 @@ def consume_chat_messages() -> None:
         "Chat consumer started:"
         f" topic={KAFKA_TOPIC}"
         f" group={CHAT_CONSUMER_GROUP}"
-        f" instance={INSTANCE_ID}"
-        f" bootstrap={KAFKA_BOOTSTRAP_SERVERS}"
+        f" instance={INSTANCE_ID}",
+        flush=True,
     )
 
     try:
@@ -235,88 +190,48 @@ def consume_chat_messages() -> None:
 
             try:
                 raw_value = msg.value()
-
                 if raw_value is None:
                     continue
 
-                value = json.loads(
-                    raw_value.decode("utf-8")
-                )
-
-                # ====================================================
-                # Debezium CDC event
-                #
-                # {
-                #     "before": null,
-                #     "after": {
-                #         "id": 1,
-                #         "conversation_id": "chat-1",
-                #         "sender": "app1",
-                #         "receiver": "app2",
-                #         "content": "Hello",
-                #         "created_at": "..."
-                #     }
-                # }
-                # ====================================================
-
+                value = json.loads(raw_value.decode("utf-8"))
                 after = value.get("after")
 
-                # Ignore deletes/tombstones.
                 if not after:
                     continue
 
                 event = {
                     "id": after.get("id"),
-                    "conversation_id": after.get(
-                        "conversation_id"
-                    ),
+                    "conversation_id": after.get("conversation_id"),
                     "sender": after.get("sender"),
                     "receiver": after.get("receiver"),
                     "content": after.get("content"),
                     "created_at": after.get("created_at"),
                 }
 
-                if not event["id"]:
-                    continue
-
-                if not event["conversation_id"]:
+                if not event["id"] or not event["conversation_id"]:
                     continue
 
                 with state_lock:
-                    # Replace an existing message with the same ID.
-                    # This protects against duplicate delivery.
                     existing = [
                         item
                         for item in chat_messages
-                        if item.get("id") == event["id"]
+                        if item.get("id") != event["id"]
                     ]
+                    existing.append(event)
 
-                    for item in existing:
-                        try:
-                            chat_messages.remove(item)
-                        except ValueError:
-                            pass
-
-                    chat_messages.append(event)
-
-                    # Keep local state in chronological order.
                     ordered = sorted(
-                        chat_messages,
+                        existing,
                         key=message_sort_key,
                     )
-
                     chat_messages.clear()
-
-                    for item in ordered[-MAX_MESSAGES:]:
-                        chat_messages.append(item)
+                    chat_messages.extend(ordered[-MAX_MESSAGES:])
 
                 print(
                     "Received chat message:"
                     f" instance={INSTANCE_ID}"
                     f" partition={msg.partition()}"
                     f" offset={msg.offset()}"
-                    f" sender={event['sender']}"
-                    f" content={event['content']!r}",
+                    f" sender={event['sender']}",
                     flush=True,
                 )
 
@@ -331,13 +246,11 @@ def consume_chat_messages() -> None:
             f"Chat Kafka consumer stopped: {exc}",
             flush=True,
         )
-
     except Exception as exc:
         print(
             f"Chat consumer stopped unexpectedly: {exc}",
             flush=True,
         )
-
     finally:
         try:
             chat_consumer.close()
@@ -346,7 +259,7 @@ def consume_chat_messages() -> None:
 
 
 # ============================================================
-# Typing Kafka Consumer
+# Typing Kafka consumer
 # ============================================================
 
 def consume_typing_events() -> None:
@@ -356,7 +269,8 @@ def consume_typing_events() -> None:
         "Typing consumer started:"
         f" topic={KAFKA_TYPING_TOPIC}"
         f" group={TYPING_CONSUMER_GROUP}"
-        f" instance={INSTANCE_ID}"
+        f" instance={INSTANCE_ID}",
+        flush=True,
     )
 
     try:
@@ -375,51 +289,27 @@ def consume_typing_events() -> None:
 
             try:
                 raw_value = msg.value()
-
                 if raw_value is None:
                     continue
 
-                event = json.loads(
-                    raw_value.decode("utf-8")
-                )
-
+                event = json.loads(raw_value.decode("utf-8"))
                 user_id = event.get("user_id")
 
-                if not user_id:
+                if not user_id or user_id == APP_ID:
                     continue
 
-                # Ignore our own typing events.
-                if user_id == APP_ID:
-                    continue
-
-                event_timestamp = int(
-                    event.get(
-                        "timestamp_ms",
-                        0,
-                    )
-                    or 0
-                )
-
-                # Backwards compatibility with events that do not
-                # contain timestamp_ms.
+                event_timestamp = int(event.get("timestamp_ms") or 0)
                 if event_timestamp <= 0:
                     event_timestamp = now_ms()
 
-                is_typing = bool(
-                    event.get(
-                        "is_typing",
-                        False,
-                    )
-                )
+                is_typing = bool(event.get("is_typing", False))
 
                 with state_lock:
                     previous = typing_users.get(user_id)
 
-                    # Ignore an older event arriving after a newer one.
                     if (
                         previous
-                        and event_timestamp
-                        < previous["timestamp_ms"]
+                        and event_timestamp < previous["timestamp_ms"]
                     ):
                         continue
 
@@ -427,14 +317,6 @@ def consume_typing_events() -> None:
                         "is_typing": is_typing,
                         "timestamp_ms": event_timestamp,
                     }
-
-                print(
-                    "Typing event received:"
-                    f" instance={INSTANCE_ID}"
-                    f" user={user_id}"
-                    f" is_typing={is_typing}",
-                    flush=True,
-                )
 
             except Exception as exc:
                 print(
@@ -447,13 +329,11 @@ def consume_typing_events() -> None:
             f"Typing Kafka consumer stopped: {exc}",
             flush=True,
         )
-
     except Exception as exc:
         print(
             f"Typing consumer stopped unexpectedly: {exc}",
             flush=True,
         )
-
     finally:
         try:
             typing_consumer.close()
@@ -467,10 +347,10 @@ def consume_typing_events() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global chat_consumer_thread
-    global typing_consumer_thread
+    global chat_consumer_thread, typing_consumer_thread
 
-    # Initialize PostgreSQL.
+    # Keep your existing DB initialization behavior, but run it
+    # off the event loop so it does not block asynchronous startup code.
     await asyncio.to_thread(init_db)
 
     stop_event.clear()
@@ -491,7 +371,7 @@ async def lifespan(app: FastAPI):
     typing_consumer_thread.start()
 
     print(
-        f"Application started:"
+        "Application started:"
         f" app={APP_ID}"
         f" instance={INSTANCE_ID}"
         f" chat_group={CHAT_CONSUMER_GROUP}"
@@ -501,7 +381,6 @@ async def lifespan(app: FastAPI):
 
     try:
         yield
-
     finally:
         print(
             f"Application shutting down: instance={INSTANCE_ID}",
@@ -510,13 +389,11 @@ async def lifespan(app: FastAPI):
 
         stop_event.set()
 
-        # Flush any pending typing events.
         try:
             typing_producer.flush(5)
         except Exception:
             pass
 
-        # Give consumer threads a moment to stop.
         if chat_consumer_thread:
             chat_consumer_thread.join(timeout=5)
 
@@ -529,16 +406,14 @@ async def lifespan(app: FastAPI):
 # ============================================================
 
 app = FastAPI(
-    title="Kafka Chat",
-    description=(
-        "PostgreSQL + Debezium + Kafka chat application"
-    ),
+    title="Kafka Chat - App 2",
+    description="PostgreSQL + Debezium + Kafka chat application",
     lifespan=lifespan,
 )
 
 
 # ============================================================
-# Request Models
+# Request models
 # ============================================================
 
 class MessageRequest(BaseModel):
@@ -552,7 +427,7 @@ class TypingRequest(BaseModel):
 
 
 # ============================================================
-# Health
+# Health / debug
 # ============================================================
 
 @app.get("/health")
@@ -563,20 +438,6 @@ def health():
         "instance_id": INSTANCE_ID,
     }
 
-
-# ============================================================
-# Export Messages
-# ============================================================
-
-@app.post("/export-messages")
-def export_messages():
-    save_messages()
-    return {"status": "export completed"}
-
-
-# ============================================================
-# Debug
-# ============================================================
 
 @app.get("/api/debug")
 def debug():
@@ -592,13 +453,21 @@ def debug():
 
 
 # ============================================================
-# Send Typing Event
+# Export messages
+# ============================================================
+
+@app.post("/export-messages")
+def export_messages():
+    save_messages()
+    return {"status": "export completed"}
+
+
+# ============================================================
+# Typing API
 # ============================================================
 
 @app.post("/typing")
-def update_typing(
-    typing: TypingRequest,
-):
+def update_typing(typing: TypingRequest):
     event = {
         "event_type": "typing",
         "conversation_id": typing.conversation_id,
@@ -613,69 +482,74 @@ def update_typing(
             key=f"{typing.conversation_id}:{APP_ID}",
             value=json.dumps(event).encode("utf-8"),
         )
-
-        # Keep your current simple synchronous behavior.
-        typing_producer.flush(5)
+        typing_producer.poll(0)
 
         return {
             "status": "sent",
             "event": event,
         }
 
+    except BufferError:
+        try:
+            typing_producer.flush(1)
+            typing_producer.produce(
+                KAFKA_TYPING_TOPIC,
+                key=f"{typing.conversation_id}:{APP_ID}",
+                value=json.dumps(event).encode("utf-8"),
+            )
+            typing_producer.poll(0)
+            return {"status": "sent", "event": event}
+        except Exception as exc:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to publish typing event: {exc}",
+            )
+
     except Exception as exc:
         raise HTTPException(
             status_code=500,
-            detail=(
-                "Failed to publish typing event: "
-                f"{exc}"
-            ),
+            detail=f"Failed to publish typing event: {exc}",
         )
 
 
-# ============================================================
-# Get Typing Users
-# ============================================================
-
 @app.get("/api/typing")
 def get_typing() -> dict[str, Any]:
+    now = now_ms()
+
     with state_lock:
+        stale_users = [
+            user_id
+            for user_id, state in typing_users.items()
+            if now - int(state.get("timestamp_ms", 0)) > TYPING_TIMEOUT_MS
+        ]
+
+        for user_id in stale_users:
+            typing_users.pop(user_id, None)
+
         users = [
             user_id
             for user_id, state in typing_users.items()
-            if state["is_typing"]
+            if state.get("is_typing")
         ]
 
-    return {
-        "typing_users": users,
-    }
+    return {"typing_users": users}
 
 
 # ============================================================
-# Get Chat Messages
+# Messages
 # ============================================================
 
 @app.get("/api/messages")
 def get_chat_messages() -> list[dict[str, Any]]:
     with state_lock:
-        messages = list(chat_messages)
+        result = list(chat_messages)
 
-    # Always return a deterministic order, even when Kafka has
-    # multiple partitions.
-    messages.sort(
-        key=message_sort_key
-    )
+    result.sort(key=message_sort_key)
+    return result
 
-    return messages
-
-
-# ============================================================
-# Create Chat Message
-# ============================================================
 
 @app.post("/messages")
-def send_message(
-    message: MessageRequest,
-):
+def send_message(message: MessageRequest):
     content = message.content.strip()
 
     if not content:
@@ -685,31 +559,10 @@ def send_message(
         )
 
     try:
-        # ========================================================
-        # IMPORTANT:
-        #
-        # HTTP request
-        #      ↓
-        # PostgreSQL
-        #      ↓
-        # Debezium
-        #      ↓
-        # Kafka
-        #      ↓
-        # Kafka consumer
-        #      ↓
-        # local replica state
-        #      ↓
-        # /api/messages
-        #
-        # The application does NOT directly publish normal
-        # chat messages to Kafka.
-        # ========================================================
-
         created_message = create_message(
             conversation_id=message.conversation_id,
             sender=APP_ID,
-            receiver="app2",
+            receiver=OTHER_APP_ID,
             content=content,
         )
 
@@ -718,730 +571,502 @@ def send_message(
     except Exception as exc:
         raise HTTPException(
             status_code=500,
-            detail=(
-                "Failed to create message: "
-                f"{exc}"
-            ),
+            detail=f"Failed to create message: {exc}",
         )
 
 
 # ============================================================
-# Chat Page
+# Shared chat frontend
 # ============================================================
 
-@app.get(
-    "/chat",
-    response_class=HTMLResponse,
-)
-def chat_page():
-    return """
+CHAT_HTML = """
 <!DOCTYPE html>
 <html lang="en">
-
 <head>
     <meta charset="UTF-8">
-
-    <meta
-        name="viewport"
-        content="width=device-width, initial-scale=1.0"
-    >
-
-    <title>Kafka Chat</title>
-
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>__APP_TITLE__</title>
     <style>
-        * {
-            box-sizing: border-box;
-        }
+        * { box-sizing: border-box; }
 
         body {
             margin: 0;
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            background: #eef2f7;
             font-family: Arial, sans-serif;
-            background: #f5f5f5;
+            color: #111827;
         }
 
-        .container {
-            width: 90%;
-            max-width: 800px;
-            margin: 40px auto;
-        }
-
-        h1 {
-            text-align: center;
-            margin-bottom: 20px;
-        }
-
-        #messages {
-            height: 500px;
-            overflow-y: auto;
+        .chat {
+            width: min(900px, 96vw);
+            height: min(860px, 92vh);
             background: white;
-            border: 1px solid #ddd;
-            border-radius: 10px;
-            padding: 15px;
-            margin-bottom: 10px;
+            border-radius: 18px;
+            box-shadow: 0 14px 45px rgba(0, 0, 0, 0.12);
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
         }
 
-        .message {
-            margin: 8px 0;
-            padding: 10px 14px;
-            border-radius: 12px;
-            max-width: 70%;
-            word-wrap: break-word;
-        }
-
-        .mine {
-            margin-left: auto;
-            background: #d9fdd3;
-            text-align: right;
-        }
-
-        .theirs {
-            margin-right: auto;
-            background: #eeeeee;
+        .header {
+            padding: 16px 20px;
+            background: #111827;
+            color: white;
         }
 
         .header-content {
-
-            display:
-                flex;
-
-            justify-content:
-                space-between;
-
-            align-items:
-                center;
-
-            gap:
-                15px;
-        }
-
-        #exportButton {
-
-            background:
-                #2563eb;
-
-            color:
-                white;
-
-            white-space:
-                nowrap;
-        }
-
-
-        #exportButton:hover {
-
-            background:
-                #1d4ed8;
-        }
-
-        #typingIndicator {
-            min-height: 24px;
-            padding: 4px 15px;
-            font-size: 13px;
-            font-style: italic;
-            color: #666;
-        }
-
-        #composer {
             display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 16px;
+        }
+
+        .header h1 {
+            margin: 0;
+            font-size: 20px;
+        }
+
+        .header p {
+            margin: 5px 0 0;
+            font-size: 12px;
+            color: #cbd5e1;
+        }
+
+        .header-actions {
+            display: flex;
+            align-items: center;
             gap: 10px;
         }
 
-        #messageInput {
-            flex: 1;
-            padding: 12px;
-            border: 1px solid #ccc;
-            border-radius: 8px;
-            font-size: 16px;
+        .status {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            color: #d1fae5;
+            font-size: 12px;
+            white-space: nowrap;
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #22c55e;
         }
 
         button {
-            padding: 12px 20px;
-            border: none;
-            border-radius: 8px;
+            border: 0;
+            padding: 11px 16px;
+            border-radius: 10px;
             cursor: pointer;
-            background: #2563eb;
-            color: white;
-            font-size: 16px;
+            font-size: 14px;
+            font-weight: 600;
         }
 
         button:disabled {
             opacity: 0.6;
             cursor: not-allowed;
         }
+
+        #exportButton {
+            background: #2563eb;
+            color: white;
+        }
+
+        #exportButton:hover:not(:disabled) {
+            background: #1d4ed8;
+        }
+
+        #messages {
+            flex: 1;
+            overflow-y: auto;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            gap: 9px;
+            background: #f8fafc;
+        }
+
+        .message-row {
+            display: flex;
+            width: 100%;
+        }
+
+        .message-row.mine { justify-content: flex-end; }
+        .message-row.theirs { justify-content: flex-start; }
+
+        .message {
+            max-width: min(72%, 620px);
+            padding: 9px 13px;
+            border-radius: 15px;
+            line-height: 1.4;
+            box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+        }
+
+        .mine .message {
+            background: #dbeafe;
+            border-bottom-right-radius: 5px;
+        }
+
+        .theirs .message {
+            background: white;
+            border: 1px solid #e5e7eb;
+            border-bottom-left-radius: 5px;
+        }
+
+        .sender {
+            font-size: 10px;
+            color: #64748b;
+            margin-bottom: 3px;
+        }
+
+        .content {
+            font-size: 14px;
+            word-break: break-word;
+            white-space: pre-wrap;
+        }
+
+        .message-time {
+            margin-top: 4px;
+            font-size: 10px;
+            color: #94a3b8;
+        }
+
+        .typing {
+            min-height: 30px;
+            padding: 5px 16px 2px;
+            font-size: 12px;
+            color: #64748b;
+            font-style: italic;
+            background: #fff;
+        }
+
+        .composer {
+            display: flex;
+            gap: 10px;
+            padding: 13px;
+            border-top: 1px solid #e5e7eb;
+            background: white;
+        }
+
+        #messageInput {
+            flex: 1;
+            min-width: 0;
+            padding: 12px 14px;
+            border: 1px solid #d1d5db;
+            border-radius: 11px;
+            outline: none;
+            font-size: 14px;
+        }
+
+        #messageInput:focus {
+            border-color: #2563eb;
+            box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
+        }
+
+        #sendButton {
+            background: #111827;
+            color: white;
+            min-width: 82px;
+        }
+
+        #sendButton:hover:not(:disabled) { background: #1f2937; }
+
+        @media (max-width: 650px) {
+            .chat {
+                width: 100vw;
+                height: 100vh;
+                border-radius: 0;
+            }
+
+            .message { max-width: 84%; }
+            .status { display: none; }
+            .header { padding: 14px; }
+            #exportButton { padding: 10px 12px; }
+        }
     </style>
 </head>
-
 <body>
-
-<div class="header">
-
-    <div class="header-content">
-
-        <div>
-            <h1>
-                App 2 Chat
-            </h1>
-
-            <p>
-                PostgreSQL → Debezium → Kafka
-            </p>
+<div class="chat">
+    <div class="header">
+        <div class="header-content">
+            <div>
+                <h1>__APP_TITLE__</h1>
+                <p>PostgreSQL → Debezium → Kafka</p>
+            </div>
+            <div class="header-actions">
+                <span class="status">
+                    <span class="status-dot"></span>
+                    Connected
+                </span>
+                <button id="exportButton" onclick="exportMessages()">
+                    Export Messages
+                </button>
+            </div>
         </div>
-
-        <button
-            id="exportButton"
-            onclick="exportMessages()"
-        >
-            Export Messages
-        </button>
-
     </div>
 
-</div>
-
-<div class="container">
-
-    <h1>Kafka Chat</h1>
-
     <div id="messages"></div>
+    <div id="typingIndicator" class="typing"></div>
 
-    <div id="typingIndicator"></div>
-
-    <div id="composer">
-
+    <div class="composer">
         <input
             id="messageInput"
             type="text"
             placeholder="Type a message..."
             autocomplete="off"
         >
-
-        <button
-            id="sendButton"
-            onclick="sendMessage()"
-        >
-            Send
-        </button>
-
+        <button id="sendButton" onclick="sendMessage()">Send</button>
     </div>
-
 </div>
 
-
 <script>
+const APP_ID = "__APP_ID__";
+const OTHER_APP_ID = "__OTHER_APP_ID__";
 
-const messagesContainer =
-    document.getElementById("messages");
-
-const input =
-    document.getElementById("messageInput");
-
-const typingIndicator =
-    document.getElementById("typingIndicator");
-
-const sendButton =
-    document.getElementById("sendButton");
-
-
-const displayedMessages =
-    new Set();
+const messagesElement = document.getElementById("messages");
+const input = document.getElementById("messageInput");
+const typingIndicator = document.getElementById("typingIndicator");
+const sendButton = document.getElementById("sendButton");
+const exportButton = document.getElementById("exportButton");
 
 let isTyping = false;
 let typingTimeout = null;
 let loadingMessages = false;
+const displayedIds = new Set();
 
-
-/* ============================================================
-   Publish typing event
-   ============================================================ */
-
-async function publishTyping(isCurrentlyTyping) {
-
-    try {
-
-        const response = await fetch(
-            "/typing",
-            {
-                method: "POST",
-
-                headers: {
-                    "Content-Type":
-                        "application/json"
-                },
-
-                body: JSON.stringify({
-                    conversation_id:
-                        "chat-1",
-
-                    is_typing:
-                        isCurrentlyTyping
-                })
-            }
-        );
-
-        if (!response.ok) {
-            console.error(
-                "Typing request failed:",
-                response.status
-            );
-        }
-
-    } catch (error) {
-
-        console.error(
-            "Failed to publish typing event:",
-            error
-        );
-
-    }
+function isNearBottom() {
+    return messagesElement.scrollHeight - messagesElement.scrollTop - messagesElement.clientHeight < 90;
 }
 
-
-/* ============================================================
-   Add message to UI
-   ============================================================ */
-
-function addMessage(message) {
-
-    if (!message.id) {
-        return;
-    }
-
-    const messageId =
-        String(message.id);
-
-    if (displayedMessages.has(messageId)) {
-        return;
-    }
-
-    displayedMessages.add(messageId);
-
-    const div =
-        document.createElement("div");
-
-    const sender =
-        String(message.sender || "");
-
-    div.className =
-        "message " +
-        (
-            sender === "app1"
-                ? "mine"
-                : "theirs"
-        );
-
-    div.dataset.messageId =
-        messageId;
-
-    div.textContent =
-        (
-            sender === "app1"
-                ? "You: "
-                : "App 2: "
-        ) +
-        String(message.content || "");
-
-    messagesContainer.appendChild(div);
-
-    messagesContainer.scrollTop =
-        messagesContainer.scrollHeight;
+function formatTime(value) {
+    if (!value) return "";
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return "";
+    return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
+function renderMessage(message, forceScroll = false) {
+    if (!message || !message.id) return;
 
-/* ============================================================
-   Load messages
-   ============================================================ */
+    const messageId = String(message.id);
+    if (displayedIds.has(messageId)) return;
+
+    const shouldScroll = forceScroll || isNearBottom();
+    displayedIds.add(messageId);
+
+    const row = document.createElement("div");
+    const mine = String(message.sender || "") === APP_ID;
+    row.className = "message-row " + (mine ? "mine" : "theirs");
+
+    const bubble = document.createElement("div");
+    bubble.className = "message";
+
+    const sender = document.createElement("div");
+    sender.className = "sender";
+    sender.textContent = mine ? "You" : String(message.sender || OTHER_APP_ID);
+
+    const content = document.createElement("div");
+    content.className = "content";
+    content.textContent = String(message.content || "");
+
+    const time = document.createElement("div");
+    time.className = "message-time";
+    time.textContent = formatTime(message.created_at);
+
+    bubble.appendChild(sender);
+    bubble.appendChild(content);
+    if (time.textContent) bubble.appendChild(time);
+
+    row.appendChild(bubble);
+    messagesElement.appendChild(row);
+
+    if (shouldScroll) messagesElement.scrollTop = messagesElement.scrollHeight;
+}
 
 async function loadMessages() {
-
-    if (loadingMessages) {
-        return;
-    }
-
+    if (loadingMessages) return;
     loadingMessages = true;
 
     try {
+        const response = await fetch("/api/messages", { cache: "no-store" });
+        if (!response.ok) return;
 
-        const response =
-            await fetch(
-                "/api/messages",
-                {
-                    cache: "no-store"
-                }
-            );
-
-        if (!response.ok) {
-            return;
-        }
-
-        const data =
-            await response.json();
-
-        // Backend already sorts messages chronologically.
-        for (const message of data) {
-            addMessage(message);
-        }
-
+        const data = await response.json();
+        for (const message of data) renderMessage(message);
     } catch (error) {
-
-        console.error(
-            "Failed to load messages:",
-            error
-        );
-
+        console.error("Failed to load messages:", error);
     } finally {
-
         loadingMessages = false;
     }
 }
 
-
-/* ============================================================
-   Load typing state
-   ============================================================ */
-
-async function loadTyping() {
-
+async function publishTyping(isCurrentlyTyping) {
     try {
-
-        const response =
-            await fetch(
-                "/api/typing",
-                {
-                    cache: "no-store"
-                }
-            );
-
-        if (!response.ok) {
-            return;
-        }
-
-        const data =
-            await response.json();
-
-        const users =
-            Array.isArray(data.typing_users)
-                ? data.typing_users
-                : [];
-
-        if (users.length > 0) {
-
-            typingIndicator.textContent =
-                users
-                    .map(
-                        user =>
-                            `${user} is typing...`
-                    )
-                    .join(", ");
-
-        } else {
-
-            typingIndicator.textContent = "";
-        }
-
+        await fetch("/typing", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                conversation_id: "chat-1",
+                is_typing: isCurrentlyTyping
+            })
+        });
     } catch (error) {
-
-        console.error(
-            "Failed to load typing state:",
-            error
-        );
-
+        console.error("Failed to publish typing event:", error);
     }
 }
 
+async function loadTyping() {
+    try {
+        const response = await fetch("/api/typing", { cache: "no-store" });
+        if (!response.ok) return;
 
-/* ============================================================
-   Send message
-   ============================================================ */
+        const data = await response.json();
+        const users = Array.isArray(data.typing_users) ? data.typing_users : [];
+
+        typingIndicator.textContent = users.length
+            ? users.map(user => `${user} is typing...`).join(", ")
+            : "";
+    } catch (error) {
+        console.error("Failed to load typing:", error);
+    }
+}
 
 async function sendMessage() {
-
-    const content =
-        input.value.trim();
-
-    if (!content) {
-        return;
-    }
+    const content = input.value.trim();
+    if (!content || sendButton.disabled) return;
 
     clearTimeout(typingTimeout);
 
     if (isTyping) {
-
         isTyping = false;
-
-        // Wait so the "false" event is actually sent
-        // before sending the message.
-        await publishTyping(false);
+        publishTyping(false);
     }
 
     sendButton.disabled = true;
 
     try {
-
-        const response =
-            await fetch(
-                "/messages",
-                {
-                    method: "POST",
-
-                    headers: {
-                        "Content-Type":
-                            "application/json"
-                    },
-
-                    body: JSON.stringify({
-                        conversation_id:
-                            "chat-1",
-
-                        content:
-                            content
-                    })
-                }
-            );
+        const response = await fetch("/messages", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                conversation_id: "chat-1",
+                content: content
+            })
+        });
 
         if (!response.ok) {
-
-            let errorMessage =
-                "Failed to send message";
-
+            let errorMessage = "Failed to send message";
             try {
-                const error =
-                    await response.json();
-
-                errorMessage =
-                    error.detail ||
-                    errorMessage;
-
-            } catch (_) {
-                // Keep default error message.
-            }
-
+                const error = await response.json();
+                errorMessage = error.detail || errorMessage;
+            } catch (_) {}
             alert(errorMessage);
-
             return;
         }
 
+        const createdMessage = await response.json();
+        renderMessage(createdMessage, true);
+
         input.value = "";
-
         input.focus();
-
-        // We intentionally do NOT add the message here.
-        //
-        // PostgreSQL receives it first.
-        // Debezium publishes it.
-        // Kafka consumer receives it.
-        // /api/messages exposes it.
-        //
-        // This preserves your intended CDC flow.
-
     } catch (error) {
-
-        console.error(
-            "Failed to send message:",
-            error
-        );
-
-        alert(
-            "Failed to send message"
-        );
-
+        console.error("Failed to send message:", error);
+        alert("Failed to send message");
     } finally {
-
         sendButton.disabled = false;
     }
 }
 
-
-/* ============================================================
-   Typing detection
-   ============================================================ */
-
-input.addEventListener(
-    "input",
-    function () {
-
-        const hasText =
-            input.value.trim().length > 0;
-
-        clearTimeout(typingTimeout);
-
-        if (hasText && !isTyping) {
-
-            isTyping = true;
-
-            publishTyping(true);
-        }
-
-        if (!hasText && isTyping) {
-
-            isTyping = false;
-
-            publishTyping(false);
-
-            return;
-        }
-
-        typingTimeout =
-            setTimeout(
-                async function () {
-
-                    if (isTyping) {
-
-                        isTyping = false;
-
-                        await publishTyping(false);
-                    }
-
-                },
-                1500
-            );
-    }
-);
-
-
-/* ============================================================
-   Export messages
-   ============================================================ */
-
 async function exportMessages() {
-
-    const exportButton =
-        document.getElementById(
-            "exportButton"
-        );
-
-
-    exportButton.disabled =
-        true;
-
-
-    exportButton.textContent =
-        "Exporting...";
-
+    exportButton.disabled = true;
+    exportButton.textContent = "Exporting...";
 
     try {
+        const response = await fetch("/export-messages", { method: "POST" });
 
-        const response =
-            await fetch(
-                "/export-messages",
-                {
-                    method:
-                        "POST"
-                }
-            );
-
-
-        if (
-            !response.ok
-        ) {
-
-            let errorMessage =
-                "Failed to export messages";
-
-
+        if (!response.ok) {
+            let errorMessage = "Failed to export messages";
             try {
-
-                const error =
-                    await response.json();
-
-                errorMessage =
-                    error.detail ||
-                    errorMessage;
-
-            } catch (_) {
-
-                // Keep default error message.
-            }
-
-
-            throw new Error(
-                errorMessage
-            );
+                const error = await response.json();
+                errorMessage = error.detail || errorMessage;
+            } catch (_) {}
+            throw new Error(errorMessage);
         }
 
-
-        const data =
-            await response.json();
-
-
-        console.log(
-            data
-        );
-
-
-        alert(
-            "Messages exported successfully!"
-        );
-
-
+        alert("Messages exported successfully!");
     } catch (error) {
-
-        console.error(
-            "Failed to export messages:",
-            error
-        );
-
-
-        alert(
-            error.message ||
-            "Failed to export messages"
-        );
-
-
+        console.error("Failed to export messages:", error);
+        alert(error.message || "Failed to export messages");
     } finally {
-
-        exportButton.disabled =
-            false;
-
-        exportButton.textContent =
-            "Export Messages";
+        exportButton.disabled = false;
+        exportButton.textContent = "Export Messages";
     }
 }
 
+input.addEventListener("input", () => {
+    const hasText = input.value.trim().length > 0;
+    clearTimeout(typingTimeout);
 
-/* ============================================================
-   Enter = Send
-   ============================================================ */
-
-input.addEventListener(
-    "keydown",
-    function (event) {
-
-        if (event.key === "Enter") {
-
-            event.preventDefault();
-
-            sendMessage();
-        }
+    if (hasText && !isTyping) {
+        isTyping = true;
+        publishTyping(true);
     }
-);
 
+    if (!hasText && isTyping) {
+        isTyping = false;
+        publishTyping(false);
+        return;
+    }
 
-/* ============================================================
-   Initial load
-   ============================================================ */
+    if (hasText) {
+        typingTimeout = setTimeout(() => {
+            if (!isTyping) return;
+            isTyping = false;
+            publishTyping(false);
+        }, 1200);
+    }
+});
+
+input.addEventListener("keydown", event => {
+    if (event.key === "Enter") {
+        event.preventDefault();
+        sendMessage();
+    }
+});
 
 loadMessages();
-
 loadTyping();
-
-
-/* ============================================================
-   Polling
-   ============================================================ */
-
-setInterval(
-    loadMessages,
-    500
-);
-
-setInterval(
-    loadTyping,
-    300
-);
-
+setInterval(loadMessages, 300);
+setInterval(loadTyping, 250);
 </script>
-
 </body>
-
 </html>
 """
+
+
+@app.get("/", response_class=HTMLResponse)
+def index() -> str:
+    return (
+        CHAT_HTML
+        .replace("__APP_TITLE__", "App 2 Chat")
+        .replace("__APP_ID__", APP_ID)
+        .replace("__OTHER_APP_ID__", OTHER_APP_ID)
+    )
+
+
+# ============================================================
+# Local development
+# ============================================================
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=8000,
+    )
