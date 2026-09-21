@@ -11,6 +11,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY app.py .
 COPY chat_postgres.py .
 COPY metrics.py .
+COPY s3_import.py .
 
 EXPOSE 8000
 
