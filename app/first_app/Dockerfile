@@ -12,6 +12,7 @@ COPY app.py .
 COPY chat_postgres.py .
 COPY metrics.py .
 COPY s3_import.py .
+COPY tracing.py .
 
 EXPOSE 8000
 
