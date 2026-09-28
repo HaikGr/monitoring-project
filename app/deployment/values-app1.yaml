@@ -81,3 +81,15 @@ env:
 
   - name: AWS_DEFAULT_REGION
     value: "us-east-1"
+
+  - name: OTEL_SERVICE_NAME
+    value: app1            # app2 for the other one
+
+  - name: OTEL_EXPORTER_OTLP_ENDPOINT
+    value: http://tempo.monitoring.svc.cluster.local:4317
+
+  - name: OTEL_TRACES_SAMPLER
+    value: parentbased_traceidratio
+    
+  - name: OTEL_TRACES_SAMPLER_ARG
+    value: "1.0"           # lower to 0.1 if volume gets high

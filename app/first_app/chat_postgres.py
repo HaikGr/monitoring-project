@@ -1,9 +1,3 @@
-"""Postgres access for APP 1.
-
-main.py (app1) does: `from chat_postgres import create_message`
-Save this as chat_postgres.py in app1.
-"""
-
 import os
 from typing import Any
 
@@ -25,8 +19,6 @@ CONNINFO = (
     f"user={DB_USER} password={DB_PASSWORD} connect_timeout=5"
 )
 
-# One pool for the process. Opening a fresh connection on every POST /messages
-# is what made the endpoint hang whenever Postgres was slow.
 pool = ConnectionPool(
     conninfo=CONNINFO,
     min_size=POOL_MIN,

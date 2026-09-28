@@ -1,13 +1,3 @@
-"""APP 1 — Kafka chat.
-
-Save as main.py in app1, next to: chat_postgres.py, s3_import.py, metrics.py
-
-Flow (unchanged):
-  POST /messages -> Postgres INSERT -> Debezium -> Kafka (chat-messages)
-                 -> consumer thread -> in-memory deque -> GET /api/messages
-  Typing         -> Kafka (chat-typing) directly, no DB.
-"""
-
 import json
 import os
 import threading
@@ -24,6 +14,9 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, Response
 from pydantic import BaseModel
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+
+from tracing import instrument_app, setup_tracing
+setup_tracing()
 
 from chat_postgres import create_message, open_export_connection
 from metrics import (
@@ -320,6 +313,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title=f"Kafka Chat - {APP_ID}", lifespan=lifespan)
+instrument_app(app) 
 
 
 class MessageRequest(BaseModel):

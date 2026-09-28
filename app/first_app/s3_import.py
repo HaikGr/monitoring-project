@@ -1,12 +1,3 @@
-"""S3 upload helper.
-
-This MUST be its own file — main.py does `from s3_import import upload_file_to_s3`.
-In your current code this was pasted into the middle of the Postgres module,
-which is why the import path was fragile.
-
-Drop this file next to main.py in BOTH apps.
-"""
-
 import os
 from pathlib import Path
 
